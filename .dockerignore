@@ -1,0 +1,16 @@
+README.md
+*.iml
+.git/**
+.travis.yml
+.gitignore
+build.sh
+config.properties
+downstream.txt
+run*
+tmp
+target/classes
+target/generated
+target/generated-sources
+target/maven-archiver
+target/maven-status
+target/original-dh2mqtt.jar
