@@ -49,7 +49,11 @@ public class Dh2MqttRelay {
         mqttClient.subscribe("dh/#");
 
         while (true) {
-            checkConnection(mqttClient);
+            try {
+                checkConnection(mqttClient);
+            } catch (Throwable e) {
+                LOGGER.log(Level.SEVERE, "Can't restore connection", e);
+            }
             Thread.sleep(1000);
         }
     }
@@ -81,7 +85,16 @@ public class Dh2MqttRelay {
         }
 
         public void connectionLost(Throwable cause) {
-            LOGGER.fine("connection lost: " + cause.getMessage());
+            LOGGER.log(Level.SEVERE, "connection lost", cause);
+            while (true) {
+                try {
+                    mqttClient.reconnect();
+                } catch (MqttException e) {
+                    LOGGER.log(Level.SEVERE, "Can't restore connection", e);
+                    continue;
+                }
+                break;
+            }
         }
 
         /**
