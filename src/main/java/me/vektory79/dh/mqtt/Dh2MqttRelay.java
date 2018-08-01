@@ -13,8 +13,30 @@ import java.util.Properties;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class Dh2MqttRelay {
+public class Dh2MqttRelay implements MqttCallback {
     private static final Logger LOGGER = Logger.getLogger(Dh2MqttRelay.class.getName());
+
+    private MqttClient mqttClient;
+    private final MqttConnectOptions connOpts = new MqttConnectOptions();
+
+    public Dh2MqttRelay(String serverURI, String clientId, String user, String password) {
+        try {
+            MqttClientPersistence persistence = new MemoryPersistence();
+            mqttClient = new MqttClient(serverURI, clientId, persistence);
+        } catch (MqttException e) {
+            throw new RuntimeException("Error creating MQTT client", e);
+        }
+
+        connOpts.setCleanSession(true);
+        connOpts.setUserName(user);
+        connOpts.setPassword(password.toCharArray());
+        mqttClient.setCallback(this);
+    }
+
+    public void connect() throws MqttException {
+        mqttClient.connect(connOpts);
+        subscribe();
+    }
 
     public static void main(String[] args) throws MqttException, InterruptedException, IOException {
         Properties props = new Properties();
@@ -35,27 +57,16 @@ public class Dh2MqttRelay {
             fallToHelp();
         }
 
-        MemoryPersistence persistence = new MemoryPersistence();
-        MqttClient mqttClient = new MqttClient(serverURL, clientID, persistence);
-
-        MqttConnectOptions connOpts = new MqttConnectOptions();
-        connOpts.setCleanSession(true);
-        connOpts.setUserName(serverUser);
-        connOpts.setPassword(serverPassword.toCharArray());
-
-        mqttClient.setCallback(new MessageListener(mqttClient));
-        mqttClient.connect(connOpts);
-
-        mqttClient.subscribe("dh/#");
+        Dh2MqttRelay relay = new Dh2MqttRelay(serverURL, clientID, serverUser, serverPassword);
+        relay.connect();
 
         while (true) {
-            try {
-                checkConnection(mqttClient);
-            } catch (Throwable e) {
-                LOGGER.log(Level.SEVERE, "Can't restore connection", e);
-            }
             Thread.sleep(1000);
         }
+    }
+
+    private void subscribe() throws MqttException {
+        mqttClient.subscribe("dh/#");
     }
 
     private static void fallToHelp() {
@@ -72,78 +83,65 @@ public class Dh2MqttRelay {
         System.exit(-1);
     }
 
-    private static void checkConnection(MqttClient mqttClient) throws MqttException {
-        if (!mqttClient.isConnected()) {
-            mqttClient.reconnect();
+    public void connectionLost(Throwable cause) {
+        LOGGER.log(Level.SEVERE, "connection lost", cause);
+        while (true) {
+            try {
+                Thread.sleep(5000);
+                try {
+                    mqttClient.disconnect();
+                } catch (Throwable e1) {
+                    LOGGER.log(Level.WARNING, e1, () ->"Can't disconnect");
+                }
+                connect();
+            } catch (Throwable e) {
+                LOGGER.log(Level.SEVERE, e, () -> "Can't restore connection");
+                continue;
+            }
+            break;
         }
     }
 
-    private static class MessageListener implements MqttCallback {
-        private final MqttClient mqttClient;
-        public MessageListener(MqttClient mqttClient) {
-            this.mqttClient = mqttClient;
+    public void deliveryComplete(IMqttDeliveryToken token) {
+        LOGGER.fine("delivery complete");
+    }
+
+    public void messageArrived(String topic, MqttMessage message) {
+        if (!topic.equals("dh/request")) {
+            return;
         }
 
-        public void connectionLost(Throwable cause) {
-            LOGGER.log(Level.SEVERE, "connection lost", cause);
-            while (true) {
+        LOGGER.fine(() -> "message arrived [" + topic + "]: " + new String(message.getPayload()) + "'");
+
+        StringBuilder mqttTopic = new StringBuilder(1024);
+        mqttTopic.append("devices").append('/');
+
+        JSONObject obj = new JSONObject(message.toString());
+        int requestId = obj.getInt("requestId");
+        if (obj.has("deviceId")) {
+            String deviceId = obj.getString("deviceId");
+            mqttTopic.append(deviceId).append('/');
+
+            if (obj.has("notification")) {
+                JSONObject notifObj = obj.getJSONObject("notification");
+                mqttTopic.append("notification").append('/');
+
+                String notification = notifObj.getString("notification");
+                mqttTopic.append(notification);
+
+                JSONObject params = notifObj.getJSONObject("parameters");
+                params.accumulate("requestId", requestId);
+
+                MqttMessage mqttRequest = new MqttMessage(params.toString().getBytes());
+                mqttRequest.setId(requestId);
+                LOGGER.info(() -> mqttTopic.toString() + ": " + params.toString());
                 try {
-                    mqttClient.reconnect();
+                    mqttClient.publish(mqttTopic.toString(), mqttRequest);
                 } catch (MqttException e) {
-                    LOGGER.log(Level.SEVERE, "Can't restore connection", e);
-                    continue;
-                }
-                break;
-            }
-        }
-
-        /**
-         * @param token
-         */
-        public void deliveryComplete(IMqttDeliveryToken token) {
-            LOGGER.fine("delivery complete");
-        }
-
-        /**
-         * @param topic
-         * @param message
-         */
-        public void messageArrived(String topic, MqttMessage message) {
-            if (!topic.equals("dh/request")) {
-                return;
-            }
-
-            LOGGER.fine("message arrived [" + topic + "]: " + new String(message.getPayload()) + "'");
-
-            StringBuilder mqttTopic = new StringBuilder(1024);
-            mqttTopic.append("devices").append('/');
-
-            JSONObject obj = new JSONObject(message.toString());
-            int requestId = obj.getInt("requestId");
-            if (obj.has("deviceId")) {
-                String deviceId = obj.getString("deviceId");
-                mqttTopic.append(deviceId).append('/');
-
-                if (obj.has("notification")) {
-                    JSONObject notifObj = obj.getJSONObject("notification");
-                    mqttTopic.append("notification").append('/');
-
-                    String notification = notifObj.getString("notification");
-                    mqttTopic.append(notification);
-
-                    JSONObject params = notifObj.getJSONObject("parameters");
-                    params.accumulate("requestId", requestId);
-
-                    MqttMessage mqttRequest = new MqttMessage(params.toString().getBytes());
-                    mqttRequest.setId(requestId);
-                    LOGGER.info(mqttTopic.toString() + ": " + params.toString());
-                    try {
-                        mqttClient.publish(mqttTopic.toString(), mqttRequest);
-                    } catch (MqttException e) {
-                        LOGGER.log(Level.SEVERE, "Error publish", e);
-                    }
+                    LOGGER.log(Level.SEVERE, e, () -> "Error publish");
                 }
             }
         }
     }
 }
+
