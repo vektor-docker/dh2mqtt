@@ -10,18 +10,26 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+@SuppressWarnings({"Duplicates", "squid:S106"})
 public class Dh2MqttRelay implements MqttCallback {
     private static final Logger LOGGER = Logger.getLogger(Dh2MqttRelay.class.getName());
 
     private MqttClient mqttClient;
     private final MqttConnectOptions connOpts = new MqttConnectOptions();
 
+    private static final AtomicInteger watchCounter = new AtomicInteger(0);
+    private String serverURI;
+    private String clientId;
+    private MqttClientPersistence persistence = new MemoryPersistence();
+
     public Dh2MqttRelay(String serverURI, String clientId, String user, String password) {
+        this.serverURI = serverURI;
+        this.clientId = clientId;
         try {
-            MqttClientPersistence persistence = new MemoryPersistence();
             mqttClient = new MqttClient(serverURI, clientId, persistence);
         } catch (MqttException e) {
             throw new RuntimeException("Error creating MQTT client", e);
@@ -31,11 +39,6 @@ public class Dh2MqttRelay implements MqttCallback {
         connOpts.setUserName(user);
         connOpts.setPassword(password.toCharArray());
         mqttClient.setCallback(this);
-    }
-
-    public void connect() throws MqttException {
-        mqttClient.connect(connOpts);
-        subscribe();
     }
 
     public static void main(String[] args) throws MqttException, InterruptedException, IOException {
@@ -62,11 +65,12 @@ public class Dh2MqttRelay implements MqttCallback {
 
         while (true) {
             Thread.sleep(1000);
+            int counter = watchCounter.incrementAndGet();
+            if (counter > 30) {
+                watchCounter.set(0);
+                relay.connectionLost(new WatchDogException());
+            }
         }
-    }
-
-    private void subscribe() throws MqttException {
-        mqttClient.subscribe("dh/#");
     }
 
     private static void fallToHelp() {
@@ -83,16 +87,26 @@ public class Dh2MqttRelay implements MqttCallback {
         System.exit(-1);
     }
 
+    private void connect() throws MqttException {
+        mqttClient.connect(connOpts);
+        subscribe();
+    }
+
+    private void subscribe() throws MqttException {
+        mqttClient.subscribe("dh/#");
+    }
+
     public void connectionLost(Throwable cause) {
         LOGGER.log(Level.SEVERE, "connection lost", cause);
         while (true) {
             try {
                 Thread.sleep(5000);
                 try {
-                    mqttClient.disconnect();
+                    mqttClient.close(true);
                 } catch (Throwable e1) {
-                    LOGGER.log(Level.WARNING, e1, () ->"Can't disconnect");
+                    LOGGER.log(Level.WARNING, e1, () ->"Can't close connection");
                 }
+                mqttClient = new MqttClient(serverURI, clientId, persistence);
                 connect();
             } catch (Throwable e) {
                 LOGGER.log(Level.SEVERE, e, () -> "Can't restore connection");
@@ -110,6 +124,8 @@ public class Dh2MqttRelay implements MqttCallback {
         if (!topic.equals("dh/request")) {
             return;
         }
+
+        watchCounter.set(0);
 
         LOGGER.fine(() -> "message arrived [" + topic + "]: " + new String(message.getPayload()) + "'");
 
