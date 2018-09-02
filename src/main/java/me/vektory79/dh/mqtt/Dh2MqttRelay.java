@@ -93,19 +93,34 @@ public class Dh2MqttRelay implements MqttCallback {
     }
 
     private void subscribe() throws MqttException {
-        mqttClient.subscribe("dh/#");
+        mqttClient.subscribe("dh/request/#");
     }
 
     public void connectionLost(Throwable cause) {
         LOGGER.log(Level.SEVERE, "connection lost", cause);
         while (true) {
             try {
-                Thread.sleep(5000);
                 try {
-                    mqttClient.close(true);
+                    mqttClient.disconnect();
+                } catch (Throwable e1) {
+                    LOGGER.log(Level.WARNING, e1, () ->"Can't disconnect");
+                }
+                try {
+                    mqttClient.disconnectForcibly();
+                } catch (Throwable e1) {
+                    LOGGER.log(Level.WARNING, e1, () ->"Can't disconnect forcibly");
+                }
+                try {
+                    mqttClient.close();
                 } catch (Throwable e1) {
                     LOGGER.log(Level.WARNING, e1, () ->"Can't close connection");
                 }
+                try {
+                    mqttClient.close(true);
+                } catch (Throwable e1) {
+                    LOGGER.log(Level.WARNING, e1, () ->"Can't close connection forcibly");
+                }
+                Thread.sleep(20000);
                 mqttClient = new MqttClient(serverURI, clientId, persistence);
                 connect();
             } catch (Throwable e) {
